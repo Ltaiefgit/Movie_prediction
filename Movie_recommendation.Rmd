@@ -1,0 +1,337 @@
+---
+title: "Movie recommendation system"
+author: "Ltaief Mohamed"
+date: "5/14/2021"
+output: 
+  pdf_document: 
+    toc: yes
+    number_sections: yes
+    fig_width: 10
+    fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate")
+if(!require(knitr)) install.packages("knitr")
+if(!require(gridExtra)) install.packages("gridExtra")
+library(gridExtra)
+library(knitr)
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+opts_chunk$set(echo = F, cache=TRUE, error=FALSE, message=FALSE, fig.cap = " ", warning=FALSE)
+```
+\newpage
+# Introduction
+Streaming industry is one of the most important modern entertainment services. As a matter of fact, it is a growing business reaching a value of 50,11 billion USD in 2020. Numerous streaming services are drawing the attention of a film consumers providing a myriad of options. However, the abundance of material can make a movie choice not an easy task. Therefore a recommendation system can be of value.
+
+# Project objective
+
+We will be creating a movie recommendation system using a 10 million version of the Movielens dataset. Our goal is to predict the values of the ratings which range on a scale from 0 to 5.
+
+### RMSE:
+To describe the behavior of our rating outcome, our approach is to define the loss function. A function that quantifies the deviation of the observed outcome from the prediction (residual).
+In our case we used the root square error(RMSE) known as the standard deviation of the residuals. It has the same units as the measured and calculated data. Smaller values indicate a better performance of our recommendation system.
+$$RMSE =\sqrt(\sum_{i=1}^{n} (X~observation,i~-X~model,i~)^2)$$
+
+# Exploratory data analysis
+
+## Features and processing
+
+### The dataset 
+
+  We are given a dataset that contains a set of movie ratings from the `Movielens`  [_**website**_](https://movielens.org/), a movie recommendation service. This was made available by the `Grouplens`, a research group at the University of Minnesota.
+  
+  Working with a big dataset is a challenging task. To make the computation easier we made two subsets; one for implementing the algorithm and one for testing its effectiveness. We called them respectively _edx_ and _validation_.
+
+The edx dataset assigns unique identification number to 69878 movies (movieId) and a unique identification number to 10677 unique users (userId). In total we have 9000055 ratings distributed between train set and test set with ratios of 90% to 10%.
+The validation dataset has 999999 ratings used to measure the RMSE of our model.
+Let's take a look at the first lines of our edx table:
+```{r}
+edx%>%tibble()%>%head()
+```
+Each row represents a rating of one user to a specific movie.
+
+### Data wrangling:
+
+Our timestamp variable is in date-time format. It represents the time in which the rating was provided since January 1, 1970. We have to make an approximation. Since we don't have the exact movie release date, we will compute the rating delay for each movie (The difference between the rating time and the first rating time) in weeks.
+
+```{r echo=FALSE}
+edx<-edx%>%mutate(time_stamp=as_date(as_datetime(timestamp)))%>%arrange(time_stamp)%>%
+  group_by(movieId)%>%mutate(first_rating_time=first(time_stamp))%>%ungroup()%>%
+  mutate(rating_time=round(difftime(time_stamp,first_rating_time, units="weeks"))+1)
+validation<-validation%>%mutate(time_stamp=as_date(as_datetime(timestamp)))%>%arrange(time_stamp)%>%
+  group_by(movieId)%>%mutate(first_rating_time=first(time_stamp))%>%ungroup()%>%
+  mutate(rating_time=round(difftime(time_stamp,first_rating_time, units="weeks"))+1)
+```
+
+```{r include=F}
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+train_set <- edx[-test_index,]
+temp <- edx[test_index,]
+
+# Make sure userId and movieId in test_set set are also in train_set set
+test_set <- temp %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from test_set set back into train_set set
+removed <- anti_join(temp, test_set)
+train_set <- rbind(train_set, removed)
+
+rm(test_index, temp, removed)
+mu_hat <-mean(train_set$rating)
+
+```
+
+
+# Model selection:
+
+## Methodology:
+
+In the course of our project we adopted a matrix factorization method to construct our algorithm.
+We assume the rating y is the same to all entries with the difference explained by random variations (bias). Thereby the goal is to minimize the residual $\epsilon$ for each observation k with b the biases total. $$\epsilon~k~=y~k~-b~k~$$
+Given that the average of all rating as a value of $\mu$ minimize the residual $\epsilon$ we will start by identifying the first element of our formula $\hat y~k~$.
+The idea is to work with the average rating $y~k~$ and gradually add the different biases caused by the main features.
+The default model performance (without considering the bias) is characterized by the following RMSE:
+```{r}
+RMSE_average<-round(RMSE(test_set$rating, mu_hat),6)
+RMSE_average
+```
+Let's have some graphical insight into our data. we made a distribution representation of a sample according to the main features:  
+
+### MovieId: 
+
+lets start by looking at the graphic representing the mean rating of movies (Fig.1 a)). Ratings are rounded to nearest 10%. 
+With the mean rating ranging from 1 to 5 Some movies clearly outperform each other. 
+Some movies are more rated than others (Fig.1 b). In fact, the number of ratings varies from 1 to 31362. For a low number of rating, the rating of the film is not reliable since it is based on a judgment of few people. That will be discussed it the tuning chapter.
+
+```{r, fig.cap= "Movie rating distribution"}
+movie_count<-edx%>%filter(movieId %in%1:150)%>%group_by(movieId)%>%ggplot(aes(movieId))+
+  geom_bar()+
+  xlab("b) Movie ID")
+movie_avg<-train_set%>%group_by(movieId)%>%summarise(b_i=mean(rating-mu_hat)) 
+movie_average_rating<-train_set%>%group_by(movieId)%>%summarise(r=round(mean(rating),1))%>%ggplot(aes(r))+
+  geom_bar()+
+  xlab("a) Movie mean rating")
+grid.arrange(movie_average_rating,movie_count, ncol=2)
+```  
+
+
+### UserId: 
+Not all the movies are rated by every user. To be exact users' number of ratings fluctuate between 10 and 6616(Figure 2.a). Some users are clearly more active than others and thus more fastidious.  
+The standards for a good movie varies from person to another(Figure 2.b). The average rating varies from a user to the other ranging from 2 to 5 stars. Some users love every movie they watch, others less. 
+
+```{r, fig.cap= "User rating distribution"}
+user_count<-edx%>%filter(userId %in% 1:150)%>%group_by(userId)%>%ggplot(aes(userId))+
+  geom_bar()+
+  xlab("a) User ID")
+user_average_rating<-train_set%>%group_by(userId)%>%summarise(r=round(mean(rating),1))%>%ggplot(aes(r))+
+  geom_bar()+
+  xlab("b) User average rating")
+grid.arrange(user_count, user_average_rating, ncol=2)
+```
+
+### Rating time:
+
+The rating time metric is ranging between 1 week and 731 weeks(Figure 3.a). Blockbuster movies get so much attention in the early stage they get released. In fact some movies get rated up to 694 times during the first month of its release (case of the movie Ghost).
+On the other hand some independent movies get rated less.
+In Figure 3.b we can clearly see that older movie ratings -more than 600 weeks (about 13 years)- have better overall rating.  
+
+```{r, fig.cap= "Rating time distribution"}
+rating_time_count<-edx%>%ggplot(aes(rating_time))+
+  geom_bar()+
+  xlab("a) Rating time")+
+  scale_x_continuous()
+average_rating_pertime<-train_set%>%group_by(rating_time)%>%
+  summarise(r=mean(rating))%>%ggplot(aes(rating_time,r))+
+  geom_point()+
+  scale_x_continuous()+
+  xlab("b) Rating Time")+
+  ylab("Average rating")
+grid.arrange(rating_time_count, average_rating_pertime, ncol=2)
+```
+
+
+Each movie rating will have a different set of predictors
+Based on these observations we are building our model characterized by:  
+* movie's overall performance  
+* user's overall evaluation   
+* Rating time 
+
+Our method is analytically described by the formula:  
+$$ Y~i,u,t~=\hat\mu+\hat b~u~+\hat b~i~+\hat b~t~+\epsilon $$
+where  
+** $\hat b~i~$ is a movie specific effect   
+** $\hat b~u~$ is a user specific effect   
+** $\hat b~t~$ is a time specific effect   
+penalized with the independent error $\epsilon$
+
+
+### The combination effect:
+In order to determine these effects we first calculate the mean of the ratings $\hat \mu$ and the movie specific effect $\hat b~i~$, estimate the user specific effect $\hat b~u~$ as the mean of $y~i,u-~\hat b~i~$ than estimate the time effect $\hat b~t~$ as the mean of $y~i,u-~\hat b~i~-~\hat b~u~$.
+```{r}
+movie_avg<-train_set%>%group_by(movieId)%>%summarise(b_i=mean(rating-mu_hat)) 
+user_avg<-train_set%>%group_by(userId)%>%summarise(b_u=mean(rating-mu_hat)) 
+time_avg<-train_set%>%group_by(rating_time)%>%summarise(b_t=mean(rating-mu_hat)) 
+um_avg<-train_set%>%left_join(movie_avg, by="movieId")%>%group_by(userId)%>%summarise(b_u=mean(rating-mu_hat-b_i))
+predicted_um<-test_set%>%left_join(movie_avg, by="movieId")%>%left_join(um_avg,by="userId")%>%mutate(p=mu_hat+b_i+b_u)%>%pull(p)
+
+umt_avg<-train_set%>%left_join(movie_avg, by="movieId")%>%left_join(user_avg, by = "userId")%>%group_by(rating_time)%>%summarise(b_t=mean(rating-mu_hat-b_u-b_i))
+predicted_umt<-test_set%>%left_join(movie_avg, by="movieId")%>%left_join(user_avg,by="userId")%>%left_join(umt_avg, by="rating_time")%>%mutate(p=mu_hat+b_i+b_u+b_t)%>%pull(p)
+```
+\newpage
+## Tuning:
+Having movies with variable rating times can alter our judgment of the rating. Let's take a look at the best 5 movies according to our model:
+```{r}
+train_set%>%group_by(movieId)%>%summarise(n_ratings=n(),average_rating=mean(rating))%>%arrange(average_rating)%>%head()
+
+```
+and the 5 worst ones:
+```{r}
+train_set%>%group_by(movieId)%>%summarise(n_ratings=n(),average_rating=mean(rating))%>%arrange(average_rating)%>%tail()
+```
+As we can see the number of ratings is very low (less than 5 for the most part). We have to penalize the extreme (large and low) estimates that have low sample size.
+To tackle this issue we are going to regularize the average rating depending on the number of ratings adding a constraint $\lambda$ (tuning parameter) in the equation. $\lambda$ represents the amount of shrinkage: The larger the value of $\lambda$, the greater the amount of shrinkage
+Our bias equations will look like this:
+$$\hat b~i~(\lambda)= \frac{1}{ \lambda + n~i~ }\sum^{n~i~}_{u=1}(Y~i,u,t~-\hat \mu)$$
+$$\hat b~u~(\lambda)= \frac{1}{ \lambda + n~u~ }\sum^{n~i~}_{u=1}(Y~i,u,t~-\hat \mu - \hat b~i~)$$
+$$\hat b~t~(\lambda)= \frac{1}{ \lambda + n~t~ }\sum^{n~i~}_{u=1}(Y~i,u,t~-\hat \mu- \hat b~i~-\hat b~u~)$$
+With $n~i~$, $n~u~$, $n~t~$ are respectively number of ratings made for a movie i, number of rating made by a user u, and number of ratings made after a time duration t. If these terms are negligibly small with respect to $\lambda$, the bias value will be close to 0.
+Selecting the optimal tuning parameter is done through cross validation to minimize the RMSE of our model.
+
+```{r}
+  #Tuning user/movie/time effect
+lambda<-seq(0,10,.25)
+rmse_user_movie<-sapply(lambda, function(L){
+  b_i<- train_set%>%group_by(movieId)%>%summarise(b_i=sum(rating-mu_hat)/(n()+L))
+  b_u<- train_set%>%left_join(b_i,by="movieId")%>%group_by(userId)%>%summarise(b_u=sum(rating-mu_hat-b_i)/(n()+L))
+  b_t<- train_set%>%left_join(b_i, by="movieId")%>%left_join(b_u,by="userId")%>%group_by(rating_time)%>%summarise(b_t=sum(rating-mu_hat-b_i-b_u)/(n()+L))
+  prediction<-test_set%>%left_join(b_i, by="movieId")%>%left_join(b_u, by="userId")%>%left_join(b_t, by="rating_time")%>%
+    mutate(p=mu_hat+b_i+b_u+b_t)%>%pull(p)
+  return(RMSE(prediction, test_set$rating))
+})
+l<-lambda[which.min(rmse_user_movie)] #chosen parameter
+
+tibble(lambda, rmse_user_movie)%>%ggplot(aes(lambda, rmse_user_movie))+
+    geom_point()+
+    xlab("lambda")+
+    ylab("RMSE")
+#tuned user/movie effect
+lambda2<-seq(0,10,.25)
+rmse_um<-sapply(lambda2, function(L){
+  b_i<- train_set%>%group_by(movieId)%>%summarise(b_i=sum(rating-mu_hat)/(n()+L))
+  b_u<- train_set%>%left_join(b_i, by="movieId")%>%group_by(userId)%>%summarise(b_u=sum(rating-mu_hat-b_i)/(n()+L))
+  prediction<-test_set%>%left_join(b_i, by="movieId")%>%left_join(b_u, by="userId")%>%
+    mutate(p=mu_hat+b_i+b_u)%>%pull(p)
+  return(RMSE(prediction, test_set$rating))
+})
+L<-lambda2[which.min(rmse_um)] #chosen parameter
+  b_i_um<- train_set%>%group_by(movieId)%>%summarise(b_i=sum(rating-mu_hat)/(n()+L))
+  b_u_um<- train_set%>%left_join(b_i_um, by="movieId")%>%group_by(userId)%>%summarise(b_u=sum(rating-mu_hat-b_i)/(n()+L))
+```
+In this case the parameter $\lambda$ equals 5.
+```{r}
+  #Tuned user/movie/time effect
+
+  b_i_t<- train_set%>%group_by(movieId)%>%summarise(b_i=sum(rating-mu_hat)/(n()+l))
+  b_u_t<- train_set%>%left_join(b_i_t, by="movieId")%>%group_by(userId)%>%summarise(b_u=sum(rating-mu_hat-b_i)/(n()+l))
+  b_t_t<- train_set%>%left_join(b_i_t, by="movieId")%>%left_join(b_u_t, by="userId")%>%group_by(rating_time)%>%summarise(b_t=sum(rating-mu_hat-b_i-b_u)/(n()+l))
+  prediction_t<-test_set%>%left_join(b_i_t, by="movieId")%>%left_join(b_u_t, by="userId")%>%left_join(b_t_t, by="rating_time")%>%
+    mutate(p=mu_hat+b_i+b_u+b_t)%>%pull(p)
+```
+
+
+# Results:
+
+In this chapter we are going to quantify the performance of our model by testing it on a separate validation data set. We will proceed by calculating the RMSE we get in each step of our analysis.
+```{r}
+prediction_m<-validation%>%left_join(movie_avg, by="movieId")%>%  mutate(p=mu_hat+b_i)%>%pull(p)
+RMSE_m<-round(RMSE(prediction_m, validation$rating),6)
+
+prediction_mu<-validation%>%left_join(movie_avg, by="movieId")%>%left_join(user_avg, by="userId")%>% mutate(p=mu_hat+b_i+b_u)%>%pull(p)
+RMSE_mu<-round(RMSE(prediction_mu, validation$rating),6)
+
+prediction_mut<-validation%>%left_join(movie_avg, by="movieId")%>%left_join(user_avg, by="userId")%>%left_join(time_avg, by="rating_time")%>% mutate(p=mu_hat+b_i+b_u+b_t)%>%pull(p)
+RMSE_mut<-round(RMSE(prediction_mut, validation$rating),6)
+
+prediction_mu_tuned<-validation%>%left_join(b_i_um, by="movieId")%>%left_join(b_u_um, by="userId")%>% mutate(p=mu_hat+b_i+b_u)%>%pull(p)
+RMSE_mu_tuned<-round(RMSE(prediction_mu_tuned, validation$rating),6)
+
+prediction_tuned<-validation%>%left_join(b_i_t, by="movieId")%>%left_join(b_u_t, by="userId")%>%left_join(b_t_t, by="rating_time")%>%
+  mutate(p=mu_hat+b_i+b_u+b_t)%>%pull(p)
+RMSE_mutr<-round(RMSE(prediction_tuned, validation$rating),6)
+tibble(method=c("Average","Movie effect","Movie+User effect","Movie+User+Time effect","Movie+User+regulerization effect","Movie+User+Time+regulerization effect"), RMSE=c(RMSE_average, RMSE_m ,RMSE_mu ,RMSE_mut,RMSE_mu_tuned ,RMSE_mutr))%>%knitr::kable()
+```
+
+# Conclusions: 
+
+In order to test movie performances across a full spectrum of users from the Movielens website we selected a 10 million version of a rating dataset and performed regularized matrix factorization to predict movie ratings. Our final model accomplished a final root mean square error of 0.864724.  
+The most important of future work is to expand the knowledge acquired during the execution of this project working on a chosen set of data.    
+
+# References:
+
+<https://grouplens.org/datasets/movielens/>
+
+Trevor Hastie, Robert Tibshirani, Jerome Friedman.
+The elements of statistical learning, Data mining, inference and prediction. second edition.
+
+<https://leanpub.com/datasciencebook>
+
+
+
+
