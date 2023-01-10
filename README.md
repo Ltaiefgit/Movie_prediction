@@ -1,2 +1,2 @@
 # Movie_prediction
-A data science project that aims to predict the rating of Movies based on a Movielens dataset
+This project aims to build a movie recommendation engine using the 10 Million entry version of the Movielens dataset. The dataset contains information on users' ratings of movies, as well as information on the movies themselves. The goal of the recommendation engine is to predict how a user will rate a movie that they have not yet watched, based on their past ratings and the ratings of other users.
